@@ -376,7 +376,7 @@ process Bet_Prelim_DWI {
     export OPENBLAS_NUM_THREADS=1
     scil_extract_b0.py $dwi $bval $bvec ${sid}__b0.nii.gz --mean\
         --b0_thr $params.b0_thr_extract_b0 --force_b0_threshold
-    bet ${sid}__b0.nii.gz ${sid}__b0_bet.nii.gz -m -R -f $params.bet_prelim_f
+    bet2 ${sid}__b0.nii.gz ${sid}__b0_bet.nii.gz -m -f $params.bet_prelim_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
     scil_image_math.py convert ${sid}__b0_bet_mask.nii.gz ${sid}__b0_bet_mask.nii.gz --data_type uint8 -f
     maskfilter ${sid}__b0_bet_mask.nii.gz dilate ${sid}__b0_bet_mask_dilated.nii.gz\
         --npass $params.dilate_b0_mask_prelim_brain_extraction -nthreads 1
@@ -553,8 +553,8 @@ process Eddy_Topup {
         export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$task.cpus
         export OPENBLAS_NUM_THREADS=1
         mrconvert $b0s_corrected b0_corrected.nii.gz -coord 3 0 -axes 0,1,2 -nthreads 1
-        bet b0_corrected.nii.gz ${sid}__b0_bet.nii.gz -m -R\
-            -f $params.bet_topup_before_eddy_f
+        bet2 b0_corrected.nii.gz ${sid}__b0_bet.nii.gz -m\
+            -f $params.bet_topup_before_eddy_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
         scil_prepare_eddy_command.py $dwi $bval $bvec ${sid}__b0_bet_mask.nii.gz\
             --topup $params.prefix_topup --eddy_cmd $params.eddy_cmd\
             --b0_thr $params.b0_thr_extract_b0\
@@ -632,7 +632,7 @@ process Bet_DWI {
     export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
     export OMP_NUM_THREADS=1
     export OPENBLAS_NUM_THREADS=1
-    bet $b0 ${sid}__b0_bet.nii.gz -m -R -f $params.bet_dwi_final_f
+    bet2 $b0 ${sid}__b0_bet.nii.gz -m -f $params.bet_dwi_final_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
     scil_image_math.py convert ${sid}__b0_bet_mask.nii.gz ${sid}__b0_bet_mask.nii.gz --data_type uint8 -f
     mrcalc $dwi ${sid}__b0_bet_mask.nii.gz -mult ${sid}__dwi_bet.nii.gz -quiet -nthreads 1
     """
