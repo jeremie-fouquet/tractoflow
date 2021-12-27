@@ -24,16 +24,14 @@ DESCRIPTION
                                         │   ├── bvec
                                         │   ├── rev_b0.nii.gz  (optional)
                                         │   ├── aparc+aseg.nii.gz  (optional)
-                                        │   ├── wmparc.nii.gz  (optional)
-                                        │   └── t1.nii.gz
+                                        │   └── wmparc.nii.gz  (optional)
                                         └── S2
                                             ├── dwi.nii.gz
                                             ├── bval
                                             ├── bvec
                                             ├── rev_b0.nii.gz  (optional)
                                             ├── aparc+aseg.nii.gz  (optional)
-                                            ├── wmparc.nii.gz  (optional)
-                                            └── t1.nii.gz
+                                            └── wmparc.nii.gz  (optional)
 
     --bids=/path/to/[bids]              BIDS folder following the BIDS convention.
 
@@ -89,12 +87,6 @@ OPTIONAL ARGUMENTS (current value)
 --run_resample_dwi                          Run resample DWI ($run_resample_dwi).
 --dwi_resolution                            DWI resolution ($dwi_resolution).
 --dwi_interpolation                         DWI interpolation method [nn, lin, quad, cubic] ($dwi_interpolation).
-
---run_t1_denoising                          Run T1 denoising ($run_t1_denoising).
-
---run_resample_t1                           Run resample T1 ($run_resample_t1).
---t1_resolution                             T1 resolution ($t1_resolution).
---t1_interpolation                          T1 interpolation method [nn, lin, quad, cubic] ($t1_interpolation).
 
 --number_of_tissues                         Number of tissue classes ($number_of_tissues).
 
@@ -165,13 +157,7 @@ OPTIONAL ARGUMENTS (current value)
 --local_random_seed                         [LOCAL] List of random seed numbers for the random number generator ($local_random_seed).
                                             Please write them as list separated using commat WITHOUT SPACE e.g. (--local_random_seed 0,1,2)
 
---template_t1                               Path to the template T1 directory for antsBrainExtraction.
-                                            The folder must contain t1_template.nii.gz and t1_brain_probability_map.nii.gz.
-                                            The default path is the human_data folder in the singularity container ($template_t1).
-
---processes_brain_extraction_t1             Number of processes for T1 brain extraction task ($processes_brain_extraction_t1).
 --processes_denoise_dwi                     Number of processes for DWI denoising task ($processes_denoise_dwi).
---processes_denoise_t1                      Number of processes for T1 denoising task ($processes_denoise_t1).
 --processes_eddy                            Number of processes for eddy task ($processes_eddy).
 --processes_fodf                            Number of processes for fODF task ($processes_fodf).
 --processes_registration                    Number of processes for registration task ($processes_registration).
@@ -193,10 +179,6 @@ fully_reproducible                          When this profile is used, all the p
                                             This profile consist to set multi-thread parameters to be fully reproducible [Theaud20].
 
 cbrain                                      When this profile is used, Nextflow will copy all the output files in publishDir and not use symlinks.
-
-ABS                                         When this profile is used, TractoFlow-ABS (Atlas Based Segmentation) is used.
-                                            This profile must be used for pathological data.
-                                            The aparc+aseg.nii.gz and wmparc.nii.gz must be in the same space than t1.nii.gz
 
 NOTES
 
