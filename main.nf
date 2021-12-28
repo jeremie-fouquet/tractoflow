@@ -32,6 +32,7 @@ if(params.help) {
                 "use_slice_drop_correction":"$params.use_slice_drop_correction",
                 "bet_dwi_final_f":"$params.bet_dwi_final_f",
                 "fa_mask_threshold":"$params.fa_mask_threshold",
+                "md_mask_threshold":"$params.md_mask_threshold",
                 "run_resample_dwi":"$params.run_resample_dwi",
                 "dwi_resolution":"$params.dwi_resolution",
                 "dwi_interpolation":"$params.dwi_interpolation",
@@ -375,7 +376,7 @@ process Bet_Prelim_DWI {
     export OPENBLAS_NUM_THREADS=1
     scil_extract_b0.py $dwi $bval $bvec ${sid}__b0.nii.gz --mean\
         --b0_thr $params.b0_thr_extract_b0 --force_b0_threshold
-    bet2 ${sid}__b0.nii.gz ${sid}__b0_bet.nii.gz -m -f $params.bet_prelim_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
+    bet2 ${sid}__b0.nii.gz ${sid}__b0_bet -m -f $params.bet_prelim_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
     scil_image_math.py convert ${sid}__b0_bet_mask.nii.gz ${sid}__b0_bet_mask.nii.gz --data_type uint8 -f
     maskfilter ${sid}__b0_bet_mask.nii.gz dilate ${sid}__b0_bet_mask_dilated.nii.gz\
         --npass $params.dilate_b0_mask_prelim_brain_extraction -nthreads 1
@@ -552,7 +553,7 @@ process Eddy_Topup {
         export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$task.cpus
         export OPENBLAS_NUM_THREADS=1
         mrconvert $b0s_corrected b0_corrected.nii.gz -coord 3 0 -axes 0,1,2 -nthreads 1
-        bet2 b0_corrected.nii.gz ${sid}__b0_bet.nii.gz -m\
+        bet2 b0_corrected.nii.gz ${sid}__b0_bet -m\
             -f $params.bet_topup_before_eddy_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
         scil_prepare_eddy_command.py $dwi $bval $bvec ${sid}__b0_bet_mask.nii.gz\
             --topup $params.prefix_topup --eddy_cmd $params.eddy_cmd\
@@ -631,7 +632,7 @@ process Bet_DWI {
     export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
     export OMP_NUM_THREADS=1
     export OPENBLAS_NUM_THREADS=1
-    bet2 $b0 ${sid}__b0_bet.nii.gz -m -f $params.bet_dwi_final_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
+    bet2 $b0 ${sid}__b0_bet -m -f $params.bet_dwi_final_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
     scil_image_math.py convert ${sid}__b0_bet_mask.nii.gz ${sid}__b0_bet_mask.nii.gz --data_type uint8 -f
     mrcalc $dwi ${sid}__b0_bet_mask.nii.gz -mult ${sid}__dwi_bet.nii.gz -quiet -nthreads 1
     """
@@ -892,7 +893,8 @@ process Resample_B0 {
     set sid, "${sid}__b0_mask_resampled.nii.gz" into\
         b0_mask_for_dti_metrics,
         b0_mask_for_fodf,
-        b0_mask_for_rf
+        b0_mask_for_rf,
+        b0_mask_for_tissue_segmentation
 
     script:
     """
@@ -1023,7 +1025,7 @@ process DTI_Metrics {
     file "${sid}__residual_q3_residuals.npy"
     file "${sid}__residual_residuals_stats.png"
     file "${sid}__residual_std_residuals.npy"
-    set sid, "${sid}__fa.nii.gz", "${sid}__md.nii.gz" into fa_md_for_fodf
+    set sid, "${sid}__fa.nii.gz", "${sid}__md.nii.gz" into fa_md_for_fodf, fa_md_for_tissue_segmentation
     set sid, "${sid}__fa.nii.gz" into\
         fa_for_reg, fa_for_pft_tracking, fa_for_local_tracking_mask, fa_for_local_seeding_mask
 
@@ -1261,6 +1263,44 @@ process Extract_FODF_Shell {
 // wm_mask_freesurfer
 //     .concat(wm_mask_fast)
 //     .into{wm_mask_for_local_tracking_mask;wm_mask_for_local_seeding_mask}
+
+
+
+process Segment_Tissues {
+    cpus 1
+
+    input:
+     set sid, file(fa), file(md) from fa_md_for_tissue_segmentation
+     set sid, file(b0_mask) from b0_mask_for_tissue_segmentation
+
+    output:
+    set sid, "${sid}__map_wm.nii.gz", "${sid}__map_gm.nii.gz",
+        "${sid}__map_csf.nii.gz" into map_wm_gm_csf_for_pft_maps
+    set sid, "${sid}__mask_wm.nii.gz" into wm_mask_for_pft_tracking, wm_mask_for_local_tracking_mask, wm_mask_for_local_seeding_mask
+    file "${sid}__mask_gm.nii.gz"
+    file "${sid}__mask_csf.nii.gz"
+
+    when:
+        !params.run_tractoflow_abs
+
+    script:
+    """
+    mrthreshold $fa ${sid}__map_wm.nii.gz -abs $params.fa_mask_threshold -nthreads 1
+    fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.3 -ero ${sid}__map_wm.nii.gz
+    fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.3 -dil ${sid}__map_wm.nii.gz
+
+    mrthreshold $md high_md_mask.nii.gz -abs $params.md_mask_threshold -nthreads 1
+    fslmaths high_md_mask.nii.gz -kernel sphere 0.3 -ero high_md_mask.nii.gz
+    fslmaths high_md_mask.nii.gz -kernel sphere 0.3 -dil high_md_mask.nii.gz
+    fslmaths ${sid}__map_wm.nii.gz -binv map_wm_inv.nii.gz
+
+    fslmaths high_md_mask.nii.gz -mas map_wm_inv.nii.gz ${sid}__mask_csf.nii.gz
+    fslmaths ${sid}__map_csf.nii.gz -binv map_csf_inv.nii.gz
+    fslmaths map_wm_inv.nii.gz -mas map_csf_inv.nii.gz ${sid}__mask_gm.nii.gz
+    fslmaths ${sid}__mask_gm.nii.gz -mas $b0_mask ${sid}__mask_gm.nii.gz
+    """
+}
+
 
 dwi_and_grad_for_rf
     .join(b0_mask_for_rf)
