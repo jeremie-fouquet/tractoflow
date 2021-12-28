@@ -117,7 +117,7 @@ if (params.input && !(params.bids && params.bids_config)){
     root = file(params.input)
     data = Channel
         .fromFilePairs("$root/**/*{bval,bvec,dwi.nii.gz}",
-                       size: 4,
+                       size: 3,
                        maxDepth:1,
                        flat: true) {it.parent.name}
 
@@ -281,7 +281,7 @@ if (params.bids && workflow.profile.contains("ABS")){
     .map{sid, bvals, bvecs, dwi, readout, encoding -> [tuple(sid, dwi),
                                         tuple(sid, bvals, bvecs),
                                         tuple(sid, readout, encoding)]}
-    .separate(4)
+    .separate(3)
 
 check_rev_b0.count().into{ rev_b0_counter; number_rev_b0_for_compare }
 
