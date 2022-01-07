@@ -832,6 +832,8 @@ process Normalize_DWI {
     scil_compute_dti_metrics.py dwi_dti.nii.gz bval_dti bvec_dti --mask $mask\
         --not_all --fa fa.nii.gz --force_b0_threshold
     mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold -nthreads 1
+    fslmaths ${sid}_fa_wm_mask.nii.gz -kernel sphere 0.3 -ero ${sid}__map_wm.nii.gz
+    fslmaths ${sid}_fa_wm_mask.nii.gz -kernel sphere 0.3 -dilM ${sid}__map_wm.nii.gz
     dwinormalise $dwi ${sid}_fa_wm_mask.nii.gz ${sid}__dwi_normalized.nii.gz\
         -fslgrad $bvec $bval -nthreads 1
     """
@@ -1286,18 +1288,22 @@ process Segment_Tissues {
     script:
     """
     mrthreshold $fa ${sid}__map_wm.nii.gz -abs $params.fa_mask_threshold -nthreads 1
-    fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.3 -ero ${sid}__map_wm.nii.gz
-    fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.3 -dil ${sid}__map_wm.nii.gz
+    #fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.15 -ero ${sid}__map_wm.nii.gz
+    #fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.15 -dilM ${sid}__map_wm.nii.gz
 
     mrthreshold $md high_md_mask.nii.gz -abs $params.md_mask_threshold -nthreads 1
     fslmaths high_md_mask.nii.gz -kernel sphere 0.3 -ero high_md_mask.nii.gz
-    fslmaths high_md_mask.nii.gz -kernel sphere 0.3 -dil high_md_mask.nii.gz
+    fslmaths high_md_mask.nii.gz -kernel sphere 0.3 -dilM high_md_mask.nii.gz
     fslmaths ${sid}__map_wm.nii.gz -binv map_wm_inv.nii.gz
 
-    fslmaths high_md_mask.nii.gz -mas map_wm_inv.nii.gz ${sid}__mask_csf.nii.gz
+    fslmaths high_md_mask.nii.gz -mas map_wm_inv.nii.gz ${sid}__map_csf.nii.gz
     fslmaths ${sid}__map_csf.nii.gz -binv map_csf_inv.nii.gz
-    fslmaths map_wm_inv.nii.gz -mas map_csf_inv.nii.gz ${sid}__mask_gm.nii.gz
-    fslmaths ${sid}__mask_gm.nii.gz -mas $b0_mask ${sid}__mask_gm.nii.gz
+    fslmaths map_wm_inv.nii.gz -mas map_csf_inv.nii.gz ${sid}__map_gm.nii.gz
+    fslmaths ${sid}__map_gm.nii.gz -mas $b0_mask ${sid}__map_gm.nii.gz
+
+    cp ${sid}__map_wm.nii.gz ${sid}__mask_wm.nii.gz
+    cp ${sid}__map_gm.nii.gz ${sid}__mask_gm.nii.gz
+    cp ${sid}__map_csf.nii.gz ${sid}__mask_csf.nii.gz
     """
 }
 
