@@ -31,6 +31,7 @@ if(params.help) {
                 "bet_topup_before_eddy_f":"$params.bet_topup_before_eddy_f",
                 "use_slice_drop_correction":"$params.use_slice_drop_correction",
                 "bet_dwi_final_f":"$params.bet_dwi_final_f",
+                "fa_mask_threshold_dwinormalise":"$params.fa_mask_threshold",
                 "fa_mask_threshold":"$params.fa_mask_threshold",
                 "md_mask_threshold":"$params.md_mask_threshold",
                 "run_resample_dwi":"$params.run_resample_dwi",
@@ -831,7 +832,7 @@ process Normalize_DWI {
         bval_dti bvec_dti -t $params.dwi_shell_tolerance
     scil_compute_dti_metrics.py dwi_dti.nii.gz bval_dti bvec_dti --mask $mask\
         --not_all --fa fa.nii.gz --force_b0_threshold
-    mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold -nthreads 1
+    mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold_dwinormalise -nthreads 1
     fslmaths ${sid}_fa_wm_mask.nii.gz -kernel sphere 0.3 -ero ${sid}__map_wm.nii.gz
     fslmaths ${sid}_fa_wm_mask.nii.gz -kernel sphere 0.3 -dilM ${sid}__map_wm.nii.gz
     dwinormalise $dwi ${sid}_fa_wm_mask.nii.gz ${sid}__dwi_normalized.nii.gz\
@@ -1287,7 +1288,10 @@ process Segment_Tissues {
 
     script:
     """
+    # Make WM mask while removing borders of the brain
+    fslmaths $b0_mask -kernel sphere 0.6 -ero b0_mask_eroded.nii.gz
     mrthreshold $fa ${sid}__map_wm.nii.gz -abs $params.fa_mask_threshold -nthreads 1
+    fslmaths ${sid}__map_wm.nii.gz -mas b0_mask_eroded.nii.gz ${sid}__map_wm.nii.gz
     #fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.15 -ero ${sid}__map_wm.nii.gz
     #fslmaths ${sid}__map_wm.nii.gz -kernel sphere 0.15 -dilM ${sid}__map_wm.nii.gz
 
