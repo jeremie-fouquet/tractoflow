@@ -833,8 +833,8 @@ process Normalize_DWI {
     scil_compute_dti_metrics.py dwi_dti.nii.gz bval_dti bvec_dti --mask $mask\
         --not_all --fa fa.nii.gz --force_b0_threshold
     mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold_dwinormalise -nthreads 1
-    fslmaths ${sid}_fa_wm_mask.nii.gz -kernel sphere 0.3 -ero ${sid}__map_wm.nii.gz
-    fslmaths ${sid}_fa_wm_mask.nii.gz -kernel sphere 0.3 -dilM ${sid}__map_wm.nii.gz
+    fslmaths $mask -kernel sphere 0.9 -ero b0_mask_eroded.nii.gz
+    fslmaths ${sid}_fa_wm_mask.nii.gz -mas b0_mask_eroded.nii.gz ${sid}_fa_wm_mask.nii.gz
     dwinormalise $dwi ${sid}_fa_wm_mask.nii.gz ${sid}__dwi_normalized.nii.gz\
         -fslgrad $bvec $bval -nthreads 1
     """
