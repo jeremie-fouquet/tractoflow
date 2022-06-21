@@ -1281,14 +1281,15 @@ process Extract_FODF_Shell {
 //     .concat(wm_mask_fast)
 //     .into{wm_mask_for_local_tracking_mask;wm_mask_for_local_seeding_mask}
 
-
+fa_md_for_tissue_segmentation
+    .join(b0_mask_for_tissue_segmentation)
+    .set{fa_md_b0_mask_for_tissue_segmentation}
 
 process Segment_Tissues {
     cpus 1
 
     input:
-     set sid, file(fa), file(md) from fa_md_for_tissue_segmentation
-     set sid, file(b0_mask) from b0_mask_for_tissue_segmentation
+    set sid, file(fa), file(md), file(b0_mask) from fa_md_b0_mask_for_tissue_segmentation
 
     output:
     set sid, "${sid}__map_wm.nii.gz", "${sid}__map_gm.nii.gz",
