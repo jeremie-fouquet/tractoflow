@@ -3,6 +3,8 @@
 import groovy.json.*
 
 params.input = false
+params.fs = false
+params.bidsignore = false
 params.bids = false
 params.bids_config = false
 params.help = false
@@ -38,13 +40,16 @@ if(params.help) {
                 "run_resample_dwi":"$params.run_resample_dwi",
                 "dwi_resolution":"$params.dwi_resolution",
                 "dwi_interpolation":"$params.dwi_interpolation",
-//                "run_t1_denoising":"$params.run_t1_denoising",
-//                "run_resample_t1":"$params.run_resample_t1",
-//                "t1_resolution":"$params.t1_resolution",
-//                "t1_interpolation":"$params.t1_interpolation",
+                "max_dti_shell_value":"$params.max_dti_shell_value",
+                "min_fodf_shell_value":"$params.min_fodf_shell_value",
+\\                "run_t1_denoising":"$params.run_t1_denoising",
+\\                "run_resample_t1":"$params.run_resample_t1",
+\\                "t1_resolution":"$params.t1_resolution",
+\\                "t1_interpolation":"$params.t1_interpolation",
                 "number_of_tissues":"$params.number_of_tissues",
                 "fa":"$params.fa",
                 "min_fa":"$params.min_fa",
+                "min_nvox":"$params.min_nvox",
                 "roi_radius":"$params.roi_radius",
                 "set_frf":"$params.set_frf",
                 "manual_frf":"$params.manual_frf",
@@ -85,6 +90,8 @@ if(params.help) {
                 "local_max_len":"$params.local_max_len",
                 "local_compress_value":"$params.local_compress_value",
                 "local_random_seed":"$params.local_random_seed",
+                "local_batch_size_gpu":"$params.local_batch_size_gpu",
+                "local_tracking_gpu":"$params.local_tracking_gpu",
                 "cpu_count":"$cpu_count",
 //                "template_t1":"$params.template_t1",
 //                "processes_brain_extraction_t1":"$params.processes_brain_extraction_t1",
@@ -92,7 +99,8 @@ if(params.help) {
 //                "processes_denoise_t1":"$params.processes_denoise_t1",
                 "processes_eddy":"$params.processes_eddy",
                 "processes_fodf":"$params.processes_fodf",
-                "processes_registration":"$params.processes_registration"]
+                "processes_registration":"$params.processes_registration",
+                "processes_local_tracking":"$params.processes_local_tracking"]
 
     engine = new groovy.text.SimpleTemplateEngine()
     template = engine.createTemplate(usage.text).make(bindings)
@@ -113,16 +121,42 @@ workflow.onComplete {
     log.info "Execution duration: $workflow.duration"
 }
 
+if( (!nextflow.version.matches('>=19.04.2'))) {
+    error "This workflow requires Nextflow (>=19.04.2, <=21.12.1) -- You are running version $nextflow.version"
+}
+if( (nextflow.version.matches('>21.12.1.edge'))) {
+    error "This workflow requires Nextflow (>=19.04.2, <=21.12.1) -- You are running version $nextflow.version"
+}
+
+if (params.dti_shells){
+    log.info "DTI shells extracted: $params.dti_shells"
+}
+else{
+  log.info "Max DTI shell extracted: $params.max_dti_shell_value"
+}
+
+if (params.fodf_shells){
+    log.info "FODF shells extracted: $params.fodf_shells"
+}
+else{
+  log.info "Min FODF shell extracted: $params.min_fodf_shell_value"
+}
+
 
 labels_for_reg = Channel.empty()
+freesurfer_path = Channel.from("")
+bidsignore_path = Channel.from("")
 if (params.input && !(params.bids && params.bids_config)){
     log.info "Input: $params.input"
     root = file(params.input)
-    data = Channel
+    Channel
         .fromFilePairs("$root/**/*{bval,bvec,dwi.nii.gz}",
-                       size: 3,
+                       size: ,
                        maxDepth:1,
                        flat: true) {it.parent.name}
+        .into{data; data_for_sid}
+    
+    data_for_sid.map{[it[0]]}.set{ch_sid_dwi}
 
     // labels_for_reg = Channel
     //         .fromFilePairs("$root/**/*{aparc+aseg.nii.gz,wmparc.nii.gz}",
@@ -130,23 +164,30 @@ if (params.input && !(params.bids && params.bids_config)){
     //                        maxDepth:1,
     //                        flat: true) {it.parent.name}
 
-    data
-        .map{[it, params.readout, params.encoding_direction].flatten()}
+    data.map{[it[0], "_", it[1..3], it[4], params.readout, params.encoding_direction].flatten()}
         .into{in_data; check_subjects_number}
 
     Channel
-    .fromPath("$root/**/*rev_b0.nii.gz",
-                    maxDepth:1)
-    .map{[it.parent.name, it]}
-    .into{rev_b0; check_rev_b0}
+        .fromPath("$root/**/*rev_b0.nii.gz",
+                        maxDepth:1)
+        .map{[it.parent.name, it]}
+        .tap{rev_b0_for_topup; check_simple_rev_b0}
+        .map{ [it[0]] }
+        .into{sid_rev_b0_included; sid_rev_b0_included_for_eddy_topup; sid_rev_b0_for_prepare_topup_dwi}
+
+    Channel.empty().into{sid_rev_dwi_included; sid_rev_dwi_included_for_eddy; sid_rev_dwi_for_prepare_topup_for_dwi; sid_rev_dwi_included_for_topup; sid_rev_dwi_for_topup; check_rev_number}
+    Channel.empty().into{ch_sid_b0; complex_rev_b0_for_topup; check_complex_rev_b0}
 }
 else if (params.bids || params.bids_config){
     if (!params.bids_config) {
         log.info "Input BIDS: $params.bids"
-        if (params.participants_label) {
-            Integer start = workflow.commandLine.indexOf("participants_label") + "participants_label".length();
-            participant_cleaned = workflow.commandLine.substring(start, workflow.commandLine.indexOf("--", start) == -1 ? workflow.commandLine.length() : workflow.commandLine.indexOf("--", start)).replace("=", "").replace("\'", "")
-            log.info "Participants: $participant_cleaned"
+        if (params.fs) {
+            freesurfer_path = file(params.fs)
+            log.info "Freesurfer path: $params.fs"
+        }
+        if (params.bidsignore) {
+            bidsignore_path = file(params.bidsignore)
+            log.info "BIDSignore path: $params.bidsignore"
         }
         log.info "Clean_bids: $params.clean_bids"
         log.info ""
@@ -162,19 +203,21 @@ else if (params.bids || params.bids_config){
 
             input:
             file(bids_folder) from bids
+            file(fs_folder) from freesurfer_path
+            file(bidsignore) from bidsignore_path
 
             output:
             file "tractoflow_bids_struct.json" into bids_struct
 
             script:
-            participants_flag =\
-            params.participants_label ? '--participants_label ' + participant_cleaned : ""
-
             clean_flag = params.clean_bids ? '--clean ' : ''
 
             """
             scil_validate_bids.py $bids_folder tractoflow_bids_struct.json\
-                --readout $params.readout $participants_flag $clean_flag
+                --readout $params.readout $clean_flag\
+                ${!fs_folder.empty() ? "--fs $fs_folder" : ""}\
+                ${!bidsignore.empty() ? "--bids_ignore $bidsignore" : ""}\
+                -v
             """
         }
     }
@@ -186,7 +229,14 @@ else if (params.bids || params.bids_config){
     }
 
     ch_in_data = Channel.create()
-    ch_rev_b0 = Channel.create()
+    ch_sid_rev_dwi = Channel.create()
+    ch_sid_rev_b0 = Channel.create()
+    ch_sid_dwi = Channel.create()
+    ch_sid_b0 = Channel.create()
+    ch_complex_rev_b0 = Channel.create()
+    ch_simple_rev_b0 = Channel.create()
+    labels_for_reg = Channel.create()
+
     bids_struct.map{it ->
     jsonSlurper = new JsonSlurper()
         data = jsonSlurper.parseText(it.getText())
@@ -204,7 +254,7 @@ else if (params.bids || params.bids_config){
                 if(item[key] == 'todo'){
                     error "Error ~ Please look at your tractoflow_bids_struct.json " +
                     "in Read_BIDS folder.\nPlease fix todo fields and give " +
-                    "this file in input using --bids_config option instead of" +
+                    "this file in input using --bids_config option instead of " +
                     "using --bids."
                 }
                 else if (item[key] == 'error_readout'){
@@ -212,33 +262,61 @@ else if (params.bids || params.bids_config){
                     "in Read_BIDS folder.\nPlease fix error_readout fields. "+
                     "This error indicate that readout time looks wrong.\n"+
                     "Please correct the value or remove the subject in the json and " +
-                    "give the updated file in input using --bids_config option instead of" +
+                    "give the updated file in input using --bids_config option instead of " +
                     "using --bids."
                 }
             }
-            sub = [sid, file(item.bval), file(item.bvec), file(item.dwi),
+            sub = [sid, "_", file(item.bval), file(item.bvec), file(item.dwi),
                    item.TotalReadoutTime, item.DWIPhaseEncodingDir[0]]
             ch_in_data.bind(sub)
+            ch_sid_dwi.bind([sid])
+            if(item.rev_topup) {
+                ch_sid_rev_b0.bind([sid])
+                if(item.topup) {
+                  ch_sid_b0.bind([sid])
+                  sub_complex_rev_b0 = [sid, file(item.rev_topup), file(item.topup)]
+                  ch_complex_rev_b0.bind(sub_complex_rev_b0)
+                }
+                else{
+                  sub_simple_rev_b0 = [sid, file(item.rev_topup)]
+                  ch_simple_rev_b0.bind(sub_simple_rev_b0)
+                }
+            }
+            
+            if(item.rev_dwi){
+                ch_rev_in_data = [sid, "_rev_", file(item.rev_bval), file(item.rev_bvec), file(item.rev_dwi),
+                                    file(item.t1), item.TotalReadoutTime, item.DWIPhaseEncodingDir[0]]
+                ch_sid_rev_dwi.bind([sid])
+                ch_in_data.bind(ch_rev_in_data)
+            }
 
-            if(item.rev_b0) {
-                sub_rev_b0 = [sid, file(item.rev_b0)]
-                ch_rev_b0.bind(sub_rev_b0)}
+            if(item.wmparc) {
+                sub_labels_for_reg = [sid, file(item.aparc_aseg), file(item.wmparc)]
+                labels_for_reg.bind(sub_labels_for_reg)
+            }
         }
-
+        ch_sid_rev_dwi.close()
+        ch_sid_rev_b0.close()
+        ch_sid_dwi.close()
+        ch_sid_b0.close()
         ch_in_data.close()
-        ch_rev_b0.close()
+        ch_simple_rev_b0.close()
+        ch_complex_rev_b0.close()
+        labels_for_reg.close()
     }
 
+    Channel.empty().into{sid_rev_dwi_included; sid_rev_b0_for_prepare_topup_dwi; sid_rev_dwi_included_for_topup; check_rev_number}
+    ch_sid_rev_dwi.into{sid_rev_dwi_included; sid_rev_dwi_included_for_topup; sid_rev_dwi_for_prepare_topup_for_dwi; sid_rev_dwi_included_for_eddy; check_rev_number}
+    ch_sid_rev_b0.into{sid_rev_b0_included; sid_rev_dwi_for_topup; sid_rev_b0_included_for_eddy_topup; sid_rev_b0_for_prepare_topup_dwi}
     ch_in_data.into{in_data; check_subjects_number}
-    ch_rev_b0.into{rev_b0; check_rev_b0}
+
+    ch_simple_rev_b0.into{rev_b0_for_topup; check_simple_rev_b0}
+    ch_complex_rev_b0.into{complex_rev_b0_for_topup; check_complex_rev_b0}
 }
 else {
     error "Error ~ Please use --input, --bids or --bids_config for the input data."
 }
-
-if (!params.dti_shells || !params.fodf_shells){
-    error "Error ~ Please set the DTI and fODF shells to use."
-}
+check_subjects_number.map{[it[0]]}.unique().set{unique_subjects_number}
 
 if (params.sh_fitting && !params.sh_fitting_shells){
     error "Error ~ Please set the SH fitting shell to use."
@@ -276,22 +354,39 @@ if (params.run_pft_tracking && workflow.profile.contains("ABS")){
     error "Error ~ PFT tracking cannot be run with Atlas Based Segmentation (ABS) profile"
 }
 
-if (params.bids && workflow.profile.contains("ABS")){
+if (params.bids && workflow.profile.contains("ABS") && !params.fs){
     error "Error ~ --bids parameter cannot be run with Atlas Based Segmentation (ABS) profile"
 }
 
-(dwi, gradients, readout_encoding) = in_data
-    .map{sid, bvals, bvecs, dwi, readout, encoding -> [tuple(sid, dwi),
-                                        tuple(sid, bvals, bvecs),
+(dwi, gradients, t1, readout_encoding) = in_data
+    .map{sid, rev_flag, bvals, bvecs, dwi, readout, encoding -> [tuple(sid, rev_flag, dwi),
+                                        tuple(sid, rev_flag, bvals, bvecs),
                                         tuple(sid, readout, encoding)]}
     .separate(3)
 
-// t1
-//     .into{t1_for_denoise; t1_for_test_denoise}
+\\ t1.unique()
+\\     .into{t1_for_denoise; t1_for_test_denoise}
 
-check_rev_b0.count().into{ rev_b0_counter; number_rev_b0_for_compare }
+check_complex_rev_b0.concat(check_simple_rev_b0).count().into{rev_b0_counter; number_rev_b0_for_compare}
 
-check_subjects_number.count().into{ number_subj_for_null_check; number_subj_for_compare }
+unique_subjects_number.count().into{number_subj_for_null_check; number_subj_for_compare}
+
+check_rev_number.count().into{number_rev_dwi; rev_dwi_counter}
+
+if (params.eddy_cmd == "eddy_cpu" && params.processes_eddy == 1 && params.run_eddy == true){
+number_rev_dwi
+    .subscribe{a -> if (a>0)
+    error "Error ~ You have some subjects with a reverse encoding DWI.\n" + 
+          "Eddy will take forever to run with this configuration. \nPlease add " + 
+          "-profile use_gpu with a GPU environnement (GPU NVIDIA with cuda) OR increase the number " + 
+          "of processes for this task (--processes_eddy) to be able to analyse this data."}
+}
+
+if (!params.run_topup || !params.run_eddy){
+number_rev_dwi
+    .subscribe{a -> if (a>0)
+    error "Error ~ You have some subjects with a reverse encoding DWI. You MUST run topup and eddy with this kind of acquisition."}
+}
 
 number_subj_for_null_check
 .subscribe{a -> if (a == 0)
@@ -310,7 +405,7 @@ number_subj_for_compare
           "Please be sure to have the same acquisitions for all subjects."}
 }
 
-dwi.into{dwi_for_prelim_bet; dwi_for_denoise; dwi_for_test_denoise}
+dwi.into{dwi_for_prelim_bet; dwi_for_denoise; dwi_for_test_denoise;truc}
 
 if (params.pft_random_seed instanceof String){
     pft_random_seed = params.pft_random_seed?.tokenize(',')
@@ -327,16 +422,18 @@ else{
 }
 
 gradients
-    .into{gradients_for_prelim_bet; gradients_for_eddy; gradients_for_topup;
+    .into{gradients_for_prelim_bet; gradients_for_eddy;
+          gradients_for_prepare_topup;
+          gradients_for_prepare_dwi_for_eddy;
           gradients_for_eddy_topup; gradients_for_test_eddy_topup}
 
 readout_encoding
     .into{readout_encoding_for_topup; readout_encoding_for_eddy;
           readout_encoding_for_eddy_topup}
 
-dwi_for_prelim_bet
-    .join(gradients_for_prelim_bet)
-    .set{dwi_gradient_for_prelim_bet}
+ch_sid_dwi
+    .into{ch_sid_dwi_for_rev; ch_sid_dwi_for_dwi}
+
 
 process README {
     cpus 1
@@ -362,12 +459,17 @@ process README {
     """
 }
 
+dwi_for_prelim_bet
+    .combine(gradients_for_prelim_bet, by: [0,1])
+    .set{dwi_gradient_for_prelim_bet}
+
 process Bet_Prelim_DWI {
     cpus 2
 
     input:
-    set sid, file(dwi), file(bval), file(bvec) from dwi_gradient_for_prelim_bet
+    set sid, val(rev), file(dwi), file(bval), file(bvec) from dwi_gradient_for_prelim_bet
     val(rev_b0_count) from rev_b0_counter
+    val(rev_dwi_count) from rev_dwi_counter
 
     output:
     set sid, "${sid}__b0_bet_mask_dilated.nii.gz" into\
@@ -376,7 +478,7 @@ process Bet_Prelim_DWI {
     file "${sid}__b0_bet_mask.nii.gz"
 
     when:
-    rev_b0_count == 0 || (!params.run_topup && params.run_eddy)
+    (rev_b0_count == 0 && rev_dwi_count == 0 && params.run_eddy) || (!params.run_topup && params.run_eddy)
 
     script:
     """
@@ -394,15 +496,16 @@ process Bet_Prelim_DWI {
     """
 }
 
+
 process Denoise_DWI {
     cpus params.processes_denoise_dwi
     label 'big_mem'
 
     input:
-    set sid, file(dwi) from dwi_for_denoise
+    set sid, val(rev), file(dwi) from dwi_for_denoise
 
     output:
-    set sid, "${sid}__dwi_denoised.nii.gz" into\
+    set sid, val(rev), "${sid}_${rev}dwi_denoised.nii.gz" into\
         dwi_denoised_for_mix
 
     when:
@@ -416,23 +519,23 @@ process Denoise_DWI {
     export OMP_NUM_THREADS=1
     export OPENBLAS_NUM_THREADS=1
     dwidenoise $dwi dwi_denoised.nii.gz -extent $params.extent -nthreads $task.cpus
-    fslmaths dwi_denoised.nii.gz -thr 0 ${sid}__dwi_denoised.nii.gz
+    fslmaths dwi_denoised.nii.gz -thr 0 ${sid}_${rev}dwi_denoised.nii.gz
     """
 }
 
 dwi_for_test_denoise
     .map{it -> if(!params.run_dwi_denoising){it}}
     .mix(dwi_denoised_for_mix)
-    .into{dwi_for_gibbs; dwi_for_eddy; dwi_for_topup; dwi_for_eddy_topup; dwi_for_test_gibbs}
+    .into{dwi_for_gibbs; dwi_for_test_gibbs}
 
 process Gibbs_correction {
     cpus params.processes_denoise_dwi
 
     input:
-    set sid, file(dwi) from dwi_for_gibbs
+    set sid, val(rev), file(dwi)  from dwi_for_gibbs
 
     output:
-    set sid, "${sid}__dwi_gibbs_corrected.nii.gz" into\
+    set sid, val(rev), "${sid}_${rev}dwi_gibbs_corrected.nii.gz" into\
         dwi_gibbs_for_mix
 
     when:
@@ -443,7 +546,7 @@ process Gibbs_correction {
     export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
     export OMP_NUM_THREADS=1
     export OPENBLAS_NUM_THREADS=1
-    mrdegibbs $dwi ${sid}__dwi_gibbs_corrected.nii.gz -nthreads $task.cpus
+    mrdegibbs $dwi ${sid}_${rev}dwi_gibbs_corrected.nii.gz -nthreads $task.cpus
     """
 }
 
@@ -452,62 +555,260 @@ dwi_for_test_gibbs
     .mix(dwi_gibbs_for_mix)
     .into{dwi_for_eddy; dwi_for_topup; dwi_for_eddy_topup; dwi_for_test_eddy_topup}
 
+ch_sid_b0
+  .mix(ch_sid_dwi_for_dwi)
+  .collect()
+  .map { it
+          // Group by sid
+          .groupBy { it }
+          // Check size
+          .collect { key, values -> [key, values.size()] }
+          // Take only the sid appearing one time (they don't have a b0)
+          .findAll { it[1] == 1}
+  }
+  .flatMap()
+  .map {[it[0]]}
+  .join(sid_rev_b0_for_prepare_topup_dwi.concat(sid_rev_dwi_for_prepare_topup_for_dwi))
+  .map {[it, "_"]}
+  .set{sid_dwi_for_prepare_topup}
+
+sid_rev_b0_included
+  .mix(sid_rev_dwi_included)
+  .collect()
+  .map { it
+          // Group by sid
+          .groupBy { it }
+          // Check size
+          .collect { key, values -> [key, values.size()] }
+          // Take only the sid appearing one time (they don't have a b0)
+          .findAll { it[1] == 1 }
+  }
+  .flatMap()
+  .map {[it[0]]}
+  .join(sid_rev_dwi_included_for_topup)
+  .map{[it, "_rev_"]}
+  .set{sid_rev_dwi_for_prepare_topup}
+
 dwi_for_topup
-    .join(gradients_for_topup)
-    .join(rev_b0)
-    .join(readout_encoding_for_topup)
-    .set{dwi_gradients_rev_b0_for_topup}
+  .combine(sid_dwi_for_prepare_topup.concat(sid_rev_dwi_for_prepare_topup), by: [0,1])
+  .join(gradients_for_prepare_topup)
+  .map{ [it[0], it[1], it[2], it[4], it[5]] }
+  .set{dwi_gradients_rev_b0_for_prepare_topup}
+
+process Prepare_for_Topup {
+  cpus 2
+
+  input:
+    set sid, val(rev), file(dwi), file(bval), file(bvec)\
+      from dwi_gradients_rev_b0_for_prepare_topup
+
+  output:
+    set sid, "${sid}_${rev}b0_mean.nii.gz", val(rev) into simple_b0_for_topup
+
+  when:
+    params.run_topup && params.run_eddy
+
+  script:
+  """
+    scil_extract_b0.py $dwi $bval $bvec ${sid}_${rev}b0_mean.nii.gz --mean\
+        --b0_thr $params.b0_thr_extract_b0 --force_b0_threshold
+  """
+}
+
+simple_b0_for_topup
+  .branch{
+    forward_b0: it[2] == "_"
+        return it[0..1]
+    reverse_b0: it[2] == "_rev_"
+        return it[0..1]
+  }
+  .set{branch_b0_for_topup}
+
+branch_b0_for_topup.reverse_b0
+  .mix(rev_b0_for_topup)
+  .join(branch_b0_for_topup.forward_b0)
+  .mix(complex_rev_b0_for_topup)
+  .join(readout_encoding_for_topup)
+  .set{rev_b0_with_readout_encoding_for_topup}
 
 process Topup {
-    cpus 2
+    cpus 4
 
     input:
-    set sid, file(dwi), file(bval), file(bvec), file(rev_b0), readout, encoding\
-        from dwi_gradients_rev_b0_for_topup
+      set sid, file(rev_b0), file(b0),  readout, encoding\
+        from rev_b0_with_readout_encoding_for_topup
 
     output:
-    set sid, "${sid}__corrected_b0s.nii.gz", "${params.prefix_topup}_fieldcoef.nii.gz",
-    "${params.prefix_topup}_movpar.txt" into topup_files_for_eddy_topup
-    file "${sid}__rev_b0_warped.nii.gz"
-    file "${sid}__b0_mean.nii.gz"
+      set sid, "${sid}__corrected_b0s.nii.gz", "${params.prefix_topup}_fieldcoef.nii.gz",
+      "${params.prefix_topup}_movpar.txt" into topup_files_for_eddy_topup
+      file "${sid}__rev_b0_warped.nii.gz"
+      file "${sid}__rev_b0_mean.nii.gz"
 
     when:
-    params.run_topup && params.run_eddy
+      params.run_topup && params.run_eddy
 
     script:
     """
-    export OMP_NUM_THREADS=$task.cpus
-    export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
-    export OPENBLAS_NUM_THREADS=1
-    export ANTS_RANDOM_SEED=1234
-    scil_extract_b0.py $dwi $bval $bvec ${sid}__b0_mean.nii.gz --mean\
-        --b0_thr $params.b0_thr_extract_b0 --force_b0_threshold
-    scil_image_math.py mean $rev_b0 $rev_b0 --data_type float32 -f
-    antsRegistrationSyNQuick.sh -d 3 -f ${sid}__b0_mean.nii.gz -m $rev_b0 -o output -t r -e 1
-    mv outputWarped.nii.gz ${sid}__rev_b0_warped.nii.gz
-    scil_prepare_topup_command.py ${sid}__b0_mean.nii.gz ${sid}__rev_b0_warped.nii.gz\
-        --config $params.config_topup\
-        --encoding_direction $encoding\
-        --readout $readout --out_prefix $params.prefix_topup\
-        --out_script
-    sh topup.sh
-    cp corrected_b0s.nii.gz ${sid}__corrected_b0s.nii.gz
+      export OMP_NUM_THREADS=$task.cpus
+      export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+      export OPENBLAS_NUM_THREADS=1
+      export ANTS_RANDOM_SEED=1234
+
+      scil_image_math.py concatenate $rev_b0 $rev_b0 ${sid}__concatenated_rev_b0.nii.gz
+      scil_image_math.py mean ${sid}__concatenated_rev_b0.nii.gz ${sid}__rev_b0_mean.nii.gz
+      antsRegistrationSyNQuick.sh -d 3 -f $b0 -m ${sid}__rev_b0_mean.nii.gz -o output -t r -e 1
+      mv outputWarped.nii.gz ${sid}__rev_b0_warped.nii.gz
+      scil_prepare_topup_command.py $b0 ${sid}__rev_b0_warped.nii.gz\
+          --config $params.config_topup\
+          --encoding_direction $encoding\
+          --readout $readout --out_prefix $params.prefix_topup\
+          --out_script
+      sh topup.sh
+      cp corrected_b0s.nii.gz ${sid}__corrected_b0s.nii.gz
     """
 }
 
+dwi_for_eddy_topup.into{complex_dwi_for_eddy_topup; simple_dwi_for_eddy_topup}
+
+// Extract subjects with reverse DWI for Prepare_dwi_for_eddy
+complex_dwi_for_eddy_topup
+    .join(gradients_for_prepare_dwi_for_eddy)
+    .map{[it[0], it[1], it[2], it[4], it[5]]}
+    .set{dwi_gradient_for_prepare_dwi_for_eddy}
+
+sid_rev_dwi_included_for_eddy
+    .combine(dwi_gradient_for_prepare_dwi_for_eddy, by: 0)
+    .branch{
+          forward_dwi: it[1] == "_"
+              return [it[0]] + it[2..-1]
+          reverse_dwi: it[1] == "_rev_"
+              return [it[0]] + it[2..-1]
+    }
+    .set{branch_dwi_gradient_for_prepare_dwi_for_eddy}
+
+branch_dwi_gradient_for_prepare_dwi_for_eddy.forward_dwi
+     .join(branch_dwi_gradient_for_prepare_dwi_for_eddy.reverse_dwi)
+     .set{dwi_rev_gradient_for_prepare_dwi_for_eddy}
+
+process Prepare_dwi_for_eddy {
+  cpus 2
+
+  input:
+    set sid, file(dwi), file(bval), file(bvec), file(rev_dwi), file(rev_bval), \
+        file(rev_bvec) from dwi_rev_gradient_for_prepare_dwi_for_eddy
+
+  output:
+    set sid, "${sid}__concatenated_dwi.nii.gz", "${sid}__concatenated_dwi.bval", "${sid}__concatenated_dwi.bvec", env(rev_number_dir) into concatenated_dwi_for_eddy
+
+  when:
+    params.run_topup && params.run_eddy
+
+  script:
+  """
+    scil_concatenate_dwi.py ${sid}__concatenated_dwi.nii.gz ${sid}__concatenated_dwi.bval ${sid}__concatenated_dwi.bvec -f\
+      --in_dwis ${dwi} ${rev_dwi} --in_bvals ${bval} ${rev_bval}\
+      --in_bvecs ${bvec} ${rev_bvec}
+
+    rev_number_dir=\$(scil_print_header.py ${rev_dwi} --key dim | sed "s/  / /g" | sed "s/  / /g" | rev | cut -d' ' -f4-4 | rev)
+  """
+}
+
+
+// Extract subjects with reverse b0 images for Eddy
+expl1 = Channel.value(0)
+
+gradients_for_eddy_topup
+    .filter{ it[1] == "_" }
+    .set{simple_gradients_for_eddy_topup}
+
+sid_rev_b0_included_for_eddy_topup
+    .combine(simple_dwi_for_eddy_topup, by: 0)
+    .filter{ it[1] == "_" }
+    .join(simple_gradients_for_eddy_topup)
+    .merge(expl1)
+    .map{[it[0], it[2], it[4], it[5], it[6]]}
+    .set{simple_dwi_gradients_for_eddy_topup}
+
+concatenated_dwi_for_eddy
+    .mix(simple_dwi_gradients_for_eddy_topup)
+    .map{ [it[0], it[1], it[2], it[3], it[4]] }
+    .join(topup_files_for_eddy_topup)
+    .join(readout_encoding_for_eddy_topup)
+    .set{dwi_gradients_mask_topup_files_for_eddy_topup}
+
+process Eddy_Topup {
+    cpus { params.processes_eddy * task.attempt }
+    memory { 5.GB * task.attempt }
+
+    input:
+    set sid, file(dwi), file(bval), file(bvec), val(number_rev_dwi), file(b0s_corrected),
+        file(field), file(movpar), readout, encoding\
+        from dwi_gradients_mask_topup_files_for_eddy_topup
+    val(rev_b0_count) from rev_b0_counter
+    val(rev_dwi_count) from rev_dwi_counter
+
+    output:
+    set sid, "${sid}__dwi_corrected.nii.gz" into\
+        dwi_from_eddy_topup
+    set sid, "${sid}__bval_eddy", "${sid}__dwi_eddy_corrected.bvec" into\
+        gradients_from_eddy_topup
+    file "${sid}__b0_bet_mask.nii.gz"
+
+    when:
+    (rev_b0_count > 0 || rev_dwi_count > 0) && params.run_topup && params.run_eddy
+
+    // Corrected DWI is clipped to ensure there are no negative values
+    // introduced by Eddy.
+    script:
+        slice_drop_flag=""
+        if (params.use_slice_drop_correction)
+            slice_drop_flag="--slice_drop_correction"
+        """
+        export OMP_NUM_THREADS=$task.cpus
+        export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$task.cpus
+        export OPENBLAS_NUM_THREADS=1
+        mrconvert $b0s_corrected b0_corrected.nii.gz -coord 3 0 -axes 0,1,2 -nthreads 1
+        bet2 b0_corrected.nii.gz ${sid}__b0_bet.nii.gz -m\
+            -f $params.bet_topup_before_eddy_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
+        scil_prepare_eddy_command.py $dwi $bval $bvec ${sid}__b0_bet_mask.nii.gz\
+            --topup $params.prefix_topup --eddy_cmd $params.eddy_cmd\
+            --b0_thr $params.b0_thr_extract_b0\
+            --encoding_direction $encoding\
+            --readout $readout --out_script --fix_seed\
+            --n_reverse ${number_rev_dwi}\
+            --lsr_resampling\
+            $slice_drop_flag
+	echo "--very_verbose" >> eddy.sh
+	sh eddy.sh
+        fslmaths dwi_eddy_corrected.nii.gz -thr 0 ${sid}__dwi_corrected.nii.gz
+
+	if [[ $number_rev_dwi -eq 0 ]]
+	then
+	   mv dwi_eddy_corrected.eddy_rotated_bvecs ${sid}__dwi_eddy_corrected.bvec
+          mv $bval ${sid}__bval_eddy
+	else
+	   scil_validate_and_correct_eddy_gradients.py dwi_eddy_corrected.eddy_rotated_bvecs $bval ${number_rev_dwi} ${sid}__dwi_eddy_corrected.bvec ${sid}__bval_eddy
+	fi
+	"""
+}
+
 dwi_for_eddy
-    .join(gradients_for_eddy)
+    .combine(gradients_for_eddy, by: [0,1])
+    .filter{ it[1] == "_" }
+    .map{ [it[0], it[2], it[3], it[4]] }
     .join(b0_mask_for_eddy)
     .join(readout_encoding_for_eddy)
     .set{dwi_gradients_mask_topup_files_for_eddy}
 
 process Eddy {
-    cpus params.processes_eddy
+    cpus { params.processes_eddy * task.attempt }
+    memory { 5.GB * task.attempt }
 
     input:
     set sid, file(dwi), file(bval), file(bvec), file(mask), readout, encoding\
         from dwi_gradients_mask_topup_files_for_eddy
     val(rev_b0_count) from rev_b0_counter
+    val(rev_dwi_count) from rev_dwi_counter
 
     output:
     set sid, "${sid}__dwi_corrected.nii.gz" into\
@@ -516,7 +817,7 @@ process Eddy {
         gradients_from_eddy
 
     when:
-    (rev_b0_count == 0 && params.run_eddy) || (!params.run_topup && params.run_eddy)
+    (rev_b0_count == 0 && rev_dwi_count == 0 && params.run_eddy) || (!params.run_topup && params.run_eddy)
 
     // Corrected DWI is clipped to 0 since Eddy can introduce negative values.
     script:
@@ -540,59 +841,17 @@ process Eddy {
         """
 }
 
-dwi_for_eddy_topup
-    .join(gradients_for_eddy_topup)
-    .join(topup_files_for_eddy_topup)
-    .join(readout_encoding_for_eddy_topup)
-    .set{dwi_gradients_mask_topup_files_for_eddy_topup}
+dwi_for_test_eddy_topup
+    .map{it -> if(!params.run_eddy){it}}
+    .filter{ it[1] == "_" }
+    .map{ [it[0], it[2]] }
+    .set{dwi_for_skip_eddy_topup}
 
-process Eddy_Topup {
-    cpus params.processes_eddy
-
-    input:
-    set sid, file(dwi), file(bval), file(bvec), file(b0s_corrected),
-        file(field), file(movpar), readout, encoding\
-        from dwi_gradients_mask_topup_files_for_eddy_topup
-    val(rev_b0_count) from rev_b0_counter
-
-    output:
-    set sid, "${sid}__dwi_corrected.nii.gz" into\
-        dwi_from_eddy_topup
-    set sid, "${sid}__bval_eddy", "${sid}__dwi_eddy_corrected.bvec" into\
-        gradients_from_eddy_topup
-    file "${sid}__b0_bet_mask.nii.gz"
-
-    when:
-    rev_b0_count > 0 && params.run_topup && params.run_eddy
-
-    // Corrected DWI is clipped to ensure there are no negative values
-    // introduced by Eddy.
-    script:
-        slice_drop_flag=""
-        if (params.use_slice_drop_correction)
-            slice_drop_flag="--slice_drop_correction"
-        """
-        export OMP_NUM_THREADS=$task.cpus
-        export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$task.cpus
-        export OPENBLAS_NUM_THREADS=1
-        mrconvert $b0s_corrected b0_corrected.nii.gz -coord 3 0 -axes 0,1,2 -nthreads 1
-        bet2 b0_corrected.nii.gz ${sid}__b0_bet -m\
-            -f $params.bet_topup_before_eddy_f -v -w 0.1 --parameter_d1=0.7 --parameter_d2=0.3
-        scil_prepare_eddy_command.py $dwi $bval $bvec ${sid}__b0_bet_mask.nii.gz\
-            --topup $params.prefix_topup --eddy_cmd $params.eddy_cmd\
-            --b0_thr $params.b0_thr_extract_b0\
-            --encoding_direction $encoding\
-            --readout $readout --out_script --fix_seed\
-            $slice_drop_flag
-        sh eddy.sh
-        fslmaths dwi_eddy_corrected.nii.gz -thr 0 ${sid}__dwi_corrected.nii.gz
-        mv dwi_eddy_corrected.eddy_rotated_bvecs ${sid}__dwi_eddy_corrected.bvec
-        mv $bval ${sid}__bval_eddy
-        """
-}
-
-dwi_for_test_eddy_topup.map{it -> if(!params.run_eddy){it}}.set{dwi_for_skip_eddy_topup}
-gradients_for_test_eddy_topup.map{it -> if(!params.run_eddy){it}}.set{gradients_for_skip_eddy_topup}
+gradients_for_test_eddy_topup
+    .map{it -> if(!params.run_eddy){it}}
+    .filter{ it[1] == "_" }
+    .map{ [it[0], it[2], it[3]] }
+    .set{gradients_for_skip_eddy_topup}
 
 dwi_from_eddy
     .mix(dwi_from_eddy_topup)
@@ -833,21 +1092,42 @@ process Normalize_DWI {
     file "${sid}_fa_wm_mask.nii.gz"
 
     script:
-    """
-    export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
-    export OMP_NUM_THREADS=1
-    export OPENBLAS_NUM_THREADS=1
-    scil_extract_dwi_shell.py $dwi \
-        $bval $bvec $params.dti_shells dwi_dti.nii.gz \
-        bval_dti bvec_dti -t $params.dwi_shell_tolerance
-    scil_compute_dti_metrics.py dwi_dti.nii.gz bval_dti bvec_dti --mask $mask\
-        --not_all --fa fa.nii.gz --force_b0_threshold
-    mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold_dwinormalise -nthreads 1
-    fslmaths $mask -kernel sphere 0.9 -ero b0_mask_eroded.nii.gz
-    fslmaths ${sid}_fa_wm_mask.nii.gz -mas b0_mask_eroded.nii.gz ${sid}_fa_wm_mask.nii.gz
-    dwinormalise $dwi ${sid}_fa_wm_mask.nii.gz ${sid}__dwi_normalized.nii.gz\
-        -fslgrad $bvec $bval -nthreads 1
-    """
+    if (params.dti_shells)
+      """
+      export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+      export OMP_NUM_THREADS=1
+      export OPENBLAS_NUM_THREADS=1
+      scil_extract_dwi_shell.py $dwi \
+          $bval $bvec $params.dti_shells dwi_dti.nii.gz \
+          bval_dti bvec_dti -t $params.dwi_shell_tolerance
+      scil_compute_dti_metrics.py dwi_dti.nii.gz bval_dti bvec_dti --mask $mask\
+          --not_all --fa fa.nii.gz --force_b0_threshold
+      mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold -nthreads 1
+      fslmaths $mask -kernel sphere 0.9 -ero b0_mask_eroded.nii.gz
+      fslmaths ${sid}_fa_wm_mask.nii.gz -mas b0_mask_eroded.nii.gz ${sid}_fa_wm_mask.nii.gz
+      dwinormalise individual $dwi ${sid}_fa_wm_mask.nii.gz ${sid}__dwi_normalized.nii.gz\
+          -fslgrad $bvec $bval -nthreads 1
+      """
+    else
+      """
+        export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+
+        shells=\$(cut -d ' ' --output-delimiter=\$'\\n' -f 1- $bval | awk -F' ' '{v=int(\$1)}{if(v<=$params.max_dti_shell_value)print v}' | uniq)
+
+        scil_extract_dwi_shell.py $dwi \
+            $bval $bvec \$shells dwi_dti.nii.gz \
+            bval_dti bvec_dti -t $params.dwi_shell_tolerance
+        scil_compute_dti_metrics.py dwi_dti.nii.gz bval_dti bvec_dti --mask $mask\
+            --not_all --fa fa.nii.gz --force_b0_threshold
+        mrthreshold fa.nii.gz ${sid}_fa_wm_mask.nii.gz -abs $params.fa_mask_threshold -nthreads 1
+        fslmaths $mask -kernel sphere 0.9 -ero b0_mask_eroded.nii.gz
+        fslmaths ${sid}_fa_wm_mask.nii.gz -mas b0_mask_eroded.nii.gz ${sid}_fa_wm_mask.nii.gz
+        dwinormalise individual $dwi ${sid}_fa_wm_mask.nii.gz ${sid}__dwi_normalized.nii.gz\
+            -fslgrad $bvec $bval -nthreads 1
+      """
+
 }
 
 dwi_for_resample
@@ -992,14 +1272,28 @@ process Extract_DTI_Shell {
         dwi_and_grad_for_rf
 
     script:
-    """
-    export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
-    export OMP_NUM_THREADS=1
-    export OPENBLAS_NUM_THREADS=1
-    scil_extract_dwi_shell.py $dwi \
-        $bval $bvec $params.dti_shells ${sid}__dwi_dti.nii.gz \
-        ${sid}__bval_dti ${sid}__bvec_dti -t $params.dwi_shell_tolerance -f
-    """
+    if (params.dti_shells)
+      """
+        export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+        scil_extract_dwi_shell.py $dwi \
+          $bval $bvec $params.dti_shells ${sid}__dwi_dti.nii.gz \
+          ${sid}__bval_dti ${sid}__bvec_dti -t $params.dwi_shell_tolerance -f
+      """
+    else
+      """
+        export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+
+        shells=\$(cut -d ' ' --output-delimiter=\$'\\n' -f 1- $bval | \
+                awk -F' ' '{v=int(\$1)}{if(v<=$params.max_dti_shell_value)print v}' | uniq)
+
+        scil_extract_dwi_shell.py $dwi \
+          $bval $bvec \$shells ${sid}__dwi_dti.nii.gz \
+          ${sid}__bval_dti ${sid}__bvec_dti -t $params.dwi_shell_tolerance -f
+      """
 }
 
 dwi_and_grad_for_dti_metrics
@@ -1082,14 +1376,29 @@ process Extract_FODF_Shell {
         dwi_and_grad_for_fodf
 
     script:
-    """
-    export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
-    export OMP_NUM_THREADS=1
-    export OPENBLAS_NUM_THREADS=1
-    scil_extract_dwi_shell.py $dwi \
-        $bval $bvec $params.fodf_shells ${sid}__dwi_fodf.nii.gz \
+    if (params.fodf_shells)
+      """
+        export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+        scil_extract_dwi_shell.py $dwi \
+          $bval $bvec $params.fodf_shells ${sid}__dwi_fodf.nii.gz \
+          ${sid}__bval_fodf ${sid}__bvec_fodf -t $params.dwi_shell_tolerance -f
+      """
+    else
+      """
+      export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
+      export OMP_NUM_THREADS=1
+      export OPENBLAS_NUM_THREADS=1
+
+      shells=\$(cut -d ' ' --output-delimiter=\$'\\n' -f 1- $bval | \
+      awk -F' ' '{v=int(\$1)}{if(v>=$params.min_fodf_shell_value|| \
+      v<=$params.b0_thr_extract_b0)print v}' | uniq)
+
+      scil_extract_dwi_shell.py $dwi \
+        $bval $bvec \$shells ${sid}__dwi_fodf.nii.gz \
         ${sid}__bval_fodf ${sid}__bvec_fodf -t $params.dwi_shell_tolerance -f
-    """
+      """
 }
 
 // t1_and_mask_for_reg
@@ -1437,7 +1746,11 @@ process FODF_Metrics {
         --fa_t $params.max_fa_in_ventricle --md_t $params.min_md_in_ventricle\
         -f
 
-    a_threshold=\$(echo $params.fodf_metrics_a_factor*\$(cat ventricles_fodf_max_value.txt)|bc)
+    v_max=\$(sed -E 's/([+-]?[0-9.]+)[eE]\\+?(-?)([0-9]+)/(\\1*10^\\2\\3)/g' <<<"\$(cat ventricles_fodf_max_value.txt)")
+    a_threshold=\$(echo "scale=10; $params.fodf_metrics_a_factor*\$v_max" | bc)
+    if (( \$(echo "\$a_threshold < 0" | bc -l) )); then
+        a_threshold=0
+    fi
 
     scil_compute_fodf_metrics.py ${sid}__fodf.nii.gz\
         --mask $b0_mask --sh_basis $params.basis\
@@ -1540,13 +1853,16 @@ process PFT_Tracking {
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
         scil_compute_pft.py $fodf $seed $include $exclude\
-            ${sid}__pft_tracking_${params.pft_algo}_${params.pft_seeding_mask_type}_seed_${curr_seed}.trk\
+            tmp.trk\
             --algo $params.pft_algo --$params.pft_seeding $params.pft_nbr_seeds\
             --seed $curr_seed --step $params.pft_step --theta $params.pft_theta\
             --sfthres $params.pft_sfthres --sfthres_init $params.pft_sfthres_init\
             --min_length $params.pft_min_len --max_length $params.pft_max_len\
             --particles $params.pft_particles --back $params.pft_back\
             --forward $params.pft_front $compress --sh_basis $params.basis
+        scil_remove_invalid_streamlines.py tmp.trk\
+            ${sid}__pft_tracking_${params.pft_algo}_${params.pft_seeding_mask_type}_seed_${curr_seed}.trk\
+            --remove_single_point
         """
 }
 
@@ -1617,7 +1933,8 @@ fodf_for_local_tracking
     .set{fodf_maps_for_local_tracking}
 
 process Local_Tracking {
-    cpus 2
+    cpus { params.processes_local_tracking * task.attempt }
+    memory { 5.GB * task.attempt }
 
     input:
     set sid, file(fodf), file(tracking_mask), file(seed)\
@@ -1633,15 +1950,24 @@ process Local_Tracking {
     script:
     compress =\
         params.local_compress_streamlines ? '--compress ' + params.local_compress_value : ''
+    use_gpu =\
+        params.local_tracking_gpu ? '--use_gpu' : ''
+    batch_size_gpu =\
+        params.local_batch_size_gpu ? '--batch_size ' + params.local_batch_size_gpu : ''
         """
         export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
         scil_compute_local_tracking.py $fodf $seed $tracking_mask\
-            ${sid}__local_tracking_${params.local_algo}_${params.local_seeding_mask_type}_seeding_${params.local_tracking_mask_type}_mask_seed_${curr_seed}.trk\
+            tmp.trk\
             --algo $params.local_algo --$params.local_seeding $params.local_nbr_seeds\
             --seed $curr_seed --step $params.local_step --theta $params.local_theta\
-            --sfthres $params.local_sfthres --min_length $params.local_min_len\
-            --max_length $params.local_max_len $compress --sh_basis $params.basis
+            --sf $params.local_sfthres --min_length $params.local_min_len\
+            --max_length $params.local_max_len $compress --sh_basis $params.basis\
+            $use_gpu $batch_size_gpu 
+
+        scil_remove_invalid_streamlines.py tmp.trk\
+            ${sid}__local_tracking_${params.local_algo}_${params.local_seeding_mask_type}_seeding_${params.local_tracking_mask_type}_mask_seed_${curr_seed}.trk\
+            --remove_single_point
         """
 }

@@ -19,19 +19,21 @@ DESCRIPTION
 
                                         [root]
                                         ├── S1
-                                        │   ├── dwi.nii.gz
-                                        │   ├── bval
-                                        │   ├── bvec
-                                        │   ├── rev_b0.nii.gz  (optional)
-                                        │   ├── aparc+aseg.nii.gz  (optional)
-                                        │   └── wmparc.nii.gz  (optional)
+                                        │   ├── *dwi.nii.gz
+                                        │   ├── *bval
+                                        │   ├── *bvec
+                                        │   ├── *rev_b0.nii.gz  (optional)
+                                        │   ├── *aparc+aseg.nii.gz  (optional)
+                                        │   ├── *wmparc.nii.gz  (optional)
+                                        │   └── *t1.nii.gz
                                         └── S2
-                                            ├── dwi.nii.gz
-                                            ├── bval
-                                            ├── bvec
-                                            ├── rev_b0.nii.gz  (optional)
-                                            ├── aparc+aseg.nii.gz  (optional)
-                                            └── wmparc.nii.gz  (optional)
+                                            ├── *dwi.nii.gz
+                                            ├── *bval
+                                            ├── *bvec
+                                            ├── *rev_b0.nii.gz  (optional)
+                                            ├── *aparc+aseg.nii.gz  (optional)
+                                            ├── *wmparc.nii.gz  (optional)
+                                            └── *t1.nii.gz
 
     --bids=/path/to/[bids]              BIDS folder following the BIDS convention.
 
@@ -39,23 +41,19 @@ DESCRIPTION
                                         This option must be used only if --bids did not work due to an issue in the BIDS
                                         folder.
 
-    --dti_shells                        Shells selected to compute the dti metrics (generally b < 1200).
-                                        Please write them between quotes e.g. (--dti_shells "0 300").
-
-    --fodf_shells                       Shells selected to compute the fodf metrics (generally b > 700).
-                                        Please write them between quotes e.g. (--fodf_shells "0 1000").
 
 Files should be compressed Nifti files (.nii.gz)
 
 OPTIONAL BIDS ARGUMENTS (current value)
 
---participants_label                        The label(s) of the specific participant(s) you want to analyzed.
-                                            It does not include "sub-".
-                                            Please write one or more subjects between quotes e.g. (--participants_label "01 02 04")
-                                            If this parameter is not provided all subjects should be analyzed.
+--fs=/path/to/[fs]                          Freesurfer output folder. One freesurfer folder per subject.
+                                            If you want to run Tractoflow-ABS (Atlas Based Segmentation) combined
+                                            with a BIDS structure input you need to have this argument.
+
+--bidsignore                                If you want to ignore some subjects or some files, you can provide an extra bidsignore file.
+                                            Check: https://github.com/bids-standard/bids-validator#bidsignore
 
 --clean_bids                                If set, it will remove all the participants that are missing any information.
-
 
 OPTIONAL ARGUMENTS (current value)
 
@@ -90,13 +88,32 @@ OPTIONAL ARGUMENTS (current value)
 --dwi_resolution                            DWI resolution ($dwi_resolution).
 --dwi_interpolation                         DWI interpolation method [nn, lin, quad, cubic] ($dwi_interpolation).
 
+--max_dti_shell_value                       Maximum shell threshold to be consider as a DTI shell (b <= $max_dti_shell_value).
+                                            This is the default behaviour to select DTI shells.
+--dti_shells                                Shells selected to compute the DTI metrics (generally b <= 1200).
+                                            Please write them between quotes e.g. (--dti_shells "0 300 1000").
+                                            If selected, it will overwrite max_dti_shell_value.
+
+--min_fodf_shell_value                      Minimum shell threshold to be consider as a fODF shell (b >= $min_fodf_shell_value).
+                                            This is the default behaviour to select fODF shells.
+--fodf_shells                               Shells selected to compute the fODF metrics (generally b >= 700).
+                                            Please write them between quotes e.g. (--fodf_shells "0 1000 2000").
+                                            If selected, it will overwrite min_fodf_shell_value.
+
+--run_t1_denoising                          Run T1 denoising ($run_t1_denoising).
+
+--run_resample_t1                           Run resample T1 ($run_resample_t1).
+--t1_resolution                             T1 resolution ($t1_resolution).
+--t1_interpolation                          T1 interpolation method [nn, lin, quad, cubic] ($t1_interpolation).
+
 --number_of_tissues                         Number of tissue classes ($number_of_tissues).
 
 --fa                                        Initial FA threshold to compute the frf ($fa).
 --min_fa                                    Minimum FA threshold to compute the frf ($min_fa).
+--min_nvox                                  Minimum number of voxels to compute the frf ($min_nvox).
 --roi_radius                                Region of interest radius to compute the frf ($roi_radius).
 --set_frf                                   Set manually the frf ($set_frf).
---manual_frf                                FRF set manually ($manual_frf).
+--manual_frf                                FRF set manually (--manual_frf "$manual_frf").
 
 --mean_frf                                  Mean the frf of all subjects ($mean_frf).
                                             USE ONLY IF ALL OF SUBJECTS COME FROM THE SAME SCANNER
@@ -158,6 +175,7 @@ OPTIONAL ARGUMENTS (current value)
 --local_compress_value                      [LOCAL] Compression error threshold ($local_compress_value).
 --local_random_seed                         [LOCAL] List of random seed numbers for the random number generator ($local_random_seed).
                                             Please write them as list separated using commat WITHOUT SPACE e.g. (--local_random_seed 0,1,2)
+--local_batch_size_gpu                      [LOCAL-GPU] Approximate size of GPU batches (number of streamlines to track in parallel) ($local_batch_size_gpu).
 
 --processes_denoise_dwi                     Number of processes for DWI denoising task ($processes_denoise_dwi).
 --processes_eddy                            Number of processes for eddy task ($processes_eddy).
@@ -170,11 +188,12 @@ OPTIONAL ARGUMENTS (current value)
 --processes                                 The number of parallel processes to launch ($cpu_count).
                                             Only affects the local scheduler.
 
-AVAILABLE PROFILES (using -profile option (e.g. -profile use_cuda,fully_reproducible))
+AVAILABLE PROFILES (using -profile option (e.g. -profile use_gpu,fully_reproducible))
 
 macos                                       When this profile is used, TractoFlow will modify a parameter (scratch) for MacOS users.
 
-use_cuda                                    When this profile is used, TractoFlow will use eddy_cuda for Eddy process.
+use_gpu                                     When this profile is used, TractoFlow will use eddy_cuda for Eddy process.
+                                            If local tracking is also enabled, Tractoflow will use the gpu implementation of scil_compute_local_tracking.py.
                                             This feature is available with NVidia GPUs only. Without this profile, TractoFlow will run eddy_openmp.
 
 fully_reproducible                          When this profile is used, all the parameters will be set to have 100% reproducible results.
@@ -187,7 +206,8 @@ cbrain                                      When this profile is used, Nextflow 
 
 ABS                                         When this profile is used, TractoFlow-ABS (Atlas Based Segmentation) is used.
                                             This profile must be used for pathological data.
-                                            The aparc+aseg.nii.gz and wmparc.nii.gz must be in the same space than t1.nii.gz
+                                            The aparc+aseg.nii.gz and wmparc.nii.gz must be in the same space than t1.nii.gz.
+                                            In order to use BIDS, either use the root structure or bids and freesurfer structures.
 
 bundling                                    When this profile is used, it will activate custom tracking parameters to improve recobundle results.
                                             Local tracking will be enable with fa seeding mask and tracking mask.
